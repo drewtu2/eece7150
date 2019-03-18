@@ -3,19 +3,84 @@ import cv2 as cv
 import imutils
 import matplotlib.pyplot as plt
 import math
+import traceback
+
 from TimeRecord import TimeRecord
-from TiledFeatureDetector import TiledFeatureDetector
+from TiledDetector import TiledDetector
+from ImageLoader import ImageLoader
+
+USE_SIFT = True     # True for SIFT, False for ORB
+
 
 class PanoStitcher():
 
     def __init__(self, timer: TimeRecord):
-        self.feat_d = TiledFeatureDetector(8, 8)
-        self.bf = cv.BFMatcher(crossCheck=False)
+        tile_size = 3
+
+        if USE_SIFT:
+            feat_d = cv.xfeatures2d.SIFT_create()
+            self.bf = cv.BFMatcher(cv.NORM_L2)
+        else:
+            feat_d = cv.ORB_create()
+            self.bf = cv.BFMatcher(cv.NORM_HAMMING)
+
+        # The tiled detector we're using
+        self.feat_d = TiledDetector(feat_d, tile_size, tile_size)
+
         self.timer = timer
         self.canvas = None
 
         # The last image we used
         self.last_image = None
+
+        # Tuning Parameters
+        self.non_max_radius = 2
+        self.lowe_ratio = .7
+
+        # Homographies
+        self.homographies = []
+
+    def match_images(self, image1, image2):
+        """
+        Matches two images and prints the homography from image1 to image2
+        :param image1:
+        :param image2:
+        :return:
+        """
+        # Find the initial features
+        kp1, dst1 = self.feat_d.detectAndCompute(image1)
+        kp2, dst2 = self.feat_d.detectAndCompute(image2)
+
+        # Reduce the original features detected using radial non max supression
+        kp1 = TiledDetector.radial_non_max(kp1, self.non_max_radius)
+        kp2 = TiledDetector.radial_non_max(kp2, self.non_max_radius)
+
+        # Recompute the features based on non the reduced keypoints
+        kp1, dst1 = self.feat_d.compute(image1, kp1)
+        kp2, dst2 = self.feat_d.compute(image2, kp2)
+
+        feat1 = TiledDetector.draw_features(image1, kp1)
+        feat2 = TiledDetector.draw_features(image2, kp2)
+        cv.imshow("Features: ", cv.hconcat([feat1, feat2]))
+
+        # Feature matching
+        lkp1, lkp2, matches = self.match_features(kp1, dst1, kp2, dst2)
+
+        # Homography estimation
+        h, mask = PanoStitcher.find_h(self.keypoints_to_point(lkp1), self.keypoints_to_point(lkp2))
+        self.get_odom(h)
+
+        matched_image = PanoStitcher.displayMatches(image1, kp1, image2, kp2, matches, mask, True)
+        cv.imshow('Matched', matched_image)
+
+        # Blending
+        #self.canvas = PanoStitcher.make_panorama(image1, image2, h)
+
+        # Display some intermediary steps
+        #cv.imshow("Blended", self.canvas)
+
+        return h
+
 
     def add_image(self, image):
         '''
@@ -30,34 +95,56 @@ class PanoStitcher():
             self.last_image = image.copy()
             return
 
-        # Feature detection
-        self.timer.start("orb")
-        kp1, dst1, kp2, dst2 = PanoStitcher.find_features(self.orb, image, self.last_image)
-        self.timer.end("orb")
 
-        # Feature matching
-        self.timer.start("feature_match")
-        lkp1, lkp2 = PanoStitcher.match_features(self.bf, kp1, dst1, kp2, dst2)
-        self.timer.end("feature_match")
+        # Match the single step from last image to this image
+        h = self.match_images(image, self.last_image)
 
-        # Homography estimation
-        self.timer.start("homography")
-        h = PanoStitcher.find_h(lkp1, lkp2)
-        self.get_odom(h)
-        self.timer.end("homography")
+        # Add the h to the list of homographies
+        self.add_h(h)
 
-        # Blending
-        self.timer.start("blend")
-        self.canvas = PanoStitcher.make_panorama(image, self.canvas, h)
-        self.timer.end("blend")
+        # Cacluate the translations through to this point
+        h = self.get_h_from_origin()
+        self.print_homos()
+        print("Composite H: \n" + str(h))
+
+        # Make the new image
+        self.canvas = self.make_panorama(image, self.canvas, h)
+
+        # Update the last image
+        self.last_image = image.copy()
+
+    def print_homos(self):
+        for index, h in enumerate(self.homographies):
+            print("Homography: " + str(index) + "\n" + str(h))
 
     def get_odom(self, h):
-        dx = h[1][2]
-        dy = h[2][2]
+        dx = h[0][2]
+        dy = h[1][2]
         theta_tan = np.rad2deg(math.atan(h[1][0]/h[0][0]))
 
+        print("h: ")
+        print(h)
         print("dx: {} \t dy: {} \t theta: {}".format(dx, dy, theta_tan))
 
+    def add_h(self, h):
+        self.homographies.append(h)
+
+    def get_h_from_origin(self):
+        """
+        Returns the homography to get form image 0 to the last image.
+        :return:
+        """
+        if len(self.homographies) == 0:
+            return np.eye(3, 3)
+        else:
+            h = self.homographies[0]
+            for index in range(1, len(self.homographies)):
+                h = np.matmul(self.homographies[index], h)
+
+            #lr = h[2, :]
+            #print("ast row: " + str(lr))
+            #h = np.array(h)/np.array(lr)
+        return h
 
     def get_canvas(self):
         '''
@@ -78,15 +165,13 @@ class PanoStitcher():
         :param im_dest: the destination image
         :return: (key pts src, description, key pts destination, description)
         '''
-        plt.figure()
         kp_m1, dst_m1 = orb.detectAndCompute(im_src, None)
         kp_m2, dst_m2 = orb.detectAndCompute(im_dest, None)
 
         return kp_m1, dst_m1, kp_m2, dst_m2
 
-    @staticmethod
-    def match_features(bf, kp_m1, dst_m1, kp_m2, dst_m2):
-        '''
+    def match_features(self, kp_m1, dst_m1, kp_m2, dst_m2):
+        """
         Match the features given out by the find_features method
         :param bf: feature matcher to use
         :param kp_m1: src key points
@@ -94,14 +179,27 @@ class PanoStitcher():
         :param kp_m2:  dest key points
         :param dst_m2: dest descriptions
         :return: matching points (pts1, pts2)
-        '''
-        matches = bf.match(dst_m1, dst_m2)
-        matches = sorted(matches, key=lambda x: x.distance)
+        """
 
-        list_kp1 = np.array([kp_m1[mat.queryIdx].pt for mat in matches])
-        list_kp2 = np.array([kp_m2[mat.trainIdx].pt for mat in matches])
+        matches = self.bf.knnMatch(dst_m1, dst_m2, k=2)
 
-        return (list_kp1, list_kp2)
+        # Apply ratio test
+        good = []
+        for m, n in matches:
+            if m.distance < self.lowe_ratio * n.distance:
+                good.append(m)
+
+        list_kp1 = np.array([kp_m1[mat.queryIdx] for mat in good])
+        list_kp2 = np.array([kp_m2[mat.trainIdx] for mat in good])
+
+        print("Matches Pre Ratio Test: " + str(len(matches)))
+        print("Matches Post Ratio Test: " + str(len(good)))
+
+        return (list_kp1, list_kp2, good)
+
+    @staticmethod
+    def keypoints_to_point(lkp):
+        return np.array([kp.pt for kp in lkp])
 
     @staticmethod
     def find_h(pts_src, pts_dest):
@@ -112,8 +210,11 @@ class PanoStitcher():
         :return: the homography matrix as a [3x3]
         '''
         M, mask = cv.findHomography(pts_src, pts_dest, cv.RANSAC)
+        #M = cv.estimateRigidTransform(pts_src, pts_dest, True)
+        #M = np.vstack([M, [0, 0, 1]])
+        print(M)
 
-        return M
+        return M, mask
 
     @staticmethod
     def make_panorama(src, dest, h):
@@ -134,7 +235,7 @@ class PanoStitcher():
         H = np.matmul(shift, h)
         print("Boundaries: " + str((min_x, min_y, max_x, max_y)))
 
-        if min(min_y, min_x) < -600:
+        if min(min_y, min_x) < -800:
             raise Exception("bad things happening??")
 
         warped_image = cv.warpPerspective(src, H, (max_x - min_x, max_y - min_y))
@@ -230,7 +331,7 @@ class PanoStitcher():
                     np.array(tr).reshape(3, 1),
                     np.array(bl).reshape(3, 1),
                     np.array(br).reshape(3, 1)])
-                new_corners = np.matmul(h, corners)
+        new_corners = np.matmul(h, corners)
 
         min_x = int(min(new_corners[0, :]))
         min_y = int(min(new_corners[1, :]))
@@ -262,39 +363,39 @@ class PanoStitcher():
         warped_image = cv.warpPerspective(dest, shift, (dest_width + shift_x, dest_height + shift_y))
         return (warped_image, shift)
 
-class ImageLoader:
-    def __init__(self):
-        self.counter = 0
-        self.imgs = ["ESC.970622_025500.0621.tif",
-                "ESC.970622_025513.0622.tif",
-                "ESC.970622_025526.0623.tif",
-                "ESC.970622_030140.0651.tif",
-                "ESC.970622_030153.0652.tif",
-                "ESC.970622_030206.0653.tif"]
+    @staticmethod
+    def displayMatches(img_left, kp1, img_right, kp2, matches, mask, display_invalid, in_image=None, color=(0, 255, 0)):
+        '''
+        This function extracts takes a 2 images, set of keypoints and a mask of valid
+        (mask as a ndarray) keypoints and plots the valid ones in green and invalid in red.
+        The mask should be the same length as matches
+        '''
 
-        def read(self):
-            im = cv.imread("../interest/" + str(self.imgs[self.counter]))
-        self.counter = self.counter + 1
+        bool_mask = mask.astype(bool)
 
-        return 0, im
+        single_point_color = (0, 255, 255)
 
-    def length(self):
-        return len(self.imgs)
+        if in_image is None:
+            mode_flag = 0
+        else:
+            mode_flag = 1
 
-    def release(self):
-        pass
+        img_valid = cv.drawMatches(img_left, kp1, img_right, kp2, matches, in_image,
+                                    matchColor=color,
+                                    singlePointColor=single_point_color,
+                                    matchesMask=bool_mask.ravel().tolist(), flags=mode_flag)
 
-
+        if display_invalid:
+            img_valid = cv.drawMatches(img_left, kp1, img_right, kp2, matches, img_valid,
+                                        matchColor=(0, 0, 255),
+                                        singlePointColor=single_point_color,
+                                        matchesMask=np.invert(bool_mask).ravel().tolist(),
+                                        flags=1)
+        return img_valid
 
 def pano(scale = .5):
     cam = ImageLoader()
     cv.startWindowThread()
-
-    #fps = cam.get(cv.CAP_PROP_FPS)  # not quite! figure out real fps
-    fps = 30
-    print("Frames per second", fps)  # with timers
-
-    frame_rate = 1;
 
     mtime = TimeRecord()
     stitcher = PanoStitcher(mtime)
@@ -313,13 +414,14 @@ def pano(scale = .5):
         if img is None:
             pass
 
-        img = cv.resize(img, (0,0), fx=scale, fy=scale)
+        #img = cv.resize(img, (0,0), fx=scale, fy=scale)
         #img = imutils.rotate(img, 270)
 
         try:
             stitcher.add_image(img)
         except Exception as e:
             print(e)
+            print(traceback.format_exc())
             pass
         canvas = stitcher.get_canvas()
         img = mtime.add_fps(img)
@@ -339,8 +441,3 @@ def pano(scale = .5):
     cv.waitKey(1)
 
 
-def main():
-    pano()
-
-if __name__ == '__main__':
-    main()

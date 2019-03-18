@@ -1,4 +1,4 @@
-from TiledOrbDetector import TiledOrbDetector
+from TiledDetector import TiledOrbDetector
 import cv2
 import matplotlib.pyplot as plt
 
