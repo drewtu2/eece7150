@@ -74,13 +74,12 @@ class PanoStitcher():
         cv.imshow('Matched', matched_image)
 
         # Blending
-        #self.canvas = PanoStitcher.make_panorama(image1, image2, h)
+        test_image = PanoStitcher.make_panorama(image1, image2, h)
 
         # Display some intermediary steps
-        #cv.imshow("Blended", self.canvas)
+        cv.imshow("Blended", test_image)
 
         return h
-
 
     def add_image(self, image):
         '''
@@ -137,9 +136,9 @@ class PanoStitcher():
         if len(self.homographies) == 0:
             return np.eye(3, 3)
         else:
-            h = self.homographies[0]
-            for index in range(1, len(self.homographies)):
-                h = np.matmul(self.homographies[index], h)
+            h = self.homographies[-1]
+            for index in range(2, len(self.homographies)):
+                h = np.matmul(self.homographies[-index], h)
 
             #lr = h[2, :]
             #print("ast row: " + str(lr))
@@ -210,8 +209,8 @@ class PanoStitcher():
         :return: the homography matrix as a [3x3]
         '''
         M, mask = cv.findHomography(pts_src, pts_dest, cv.RANSAC)
-        #M = cv.estimateRigidTransform(pts_src, pts_dest, True)
-        #M = np.vstack([M, [0, 0, 1]])
+        M = cv.estimateRigidTransform(pts_src, pts_dest, True)
+        M = np.vstack([M, [0, 0, 1]])
         print(M)
 
         return M, mask
