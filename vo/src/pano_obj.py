@@ -39,6 +39,7 @@ class PanoStitcher():
 
         # Homographies
         self.homographies = []
+        self.homographies_to_origin = [np.eye(3, 3)]
 
     def match_images(self, image1, image2):
         """
@@ -74,7 +75,7 @@ class PanoStitcher():
         cv.imshow('Matched', matched_image)
 
         # Blending
-        test_image = PanoStitcher.make_panorama(image1, image2, h)
+        test_image, _ = PanoStitcher.make_panorama(image1, image2, h)
 
         # Display some intermediary steps
         cv.imshow("Blended", test_image)
@@ -102,43 +103,64 @@ class PanoStitcher():
         self.add_h(h)
 
         # Cacluate the translations through to this point
-        h = self.get_h_from_origin()
+        h = self.homographies_to_origin[-1]
         self.print_homos()
         print("Composite H: \n" + str(h))
+        print("Odom...\n", self.get_odom(h))
 
         # Make the new image
-        self.canvas = self.make_panorama(image, self.canvas, h)
+        self.canvas, shift = self.make_panorama(image, self.canvas, h)
 
         # Update the last image
+        #min_x, min_y, max_x, max_y = PanoStitcher.get_boundaries(image.shape, shift)
+        #self.last_image = cv.warpPerspective(image, shift, (max_x, max_y))
         self.last_image = image.copy()
 
     def print_homos(self):
         for index, h in enumerate(self.homographies):
             print("Homography: " + str(index) + "\n" + str(h))
 
-    def get_odom(self, h):
+    @staticmethod
+    def get_odom(h):
         dx = h[0][2]
         dy = h[1][2]
-        theta_tan = np.rad2deg(math.atan(h[1][0]/h[0][0]))
+
+        R = h[0:2, 0:2]
+        print("R pre-correction\n" + str(R))
+        u, s, vh = np.linalg.svd(R)
+        print(R/(u@vh))
+
+        h[0:2, 0:2] = u @ vh
+
+        theta_tan = math.atan2(h[0][1], h[0][0])
 
         print("h: ")
         print(h)
-        print("dx: {} \t dy: {} \t theta: {}".format(dx, dy, theta_tan))
+        print("dx: {} \t dy: {} \t theta: {} radians".format(dx, dy, theta_tan))
+        return dx, dy, theta_tan
 
     def add_h(self, h):
         self.homographies.append(h)
+        self.homographies_to_origin.append(self.homographies_to_origin[-1] @ h)
 
-    def get_h_from_origin(self):
+    def get_h_from_origin(self, n=-1):
         """
         Returns the homography to get form image 0 to the last image.
         :return:
         """
-        if len(self.homographies) == 0:
+
+        if n == -1:
+            homographies_to_use = self.homographies
+        else:
+            homographies_to_use = self.homographies[0:n]
+
+        if len(homographies_to_use) == 0:
             return np.eye(3, 3)
         else:
-            h = self.homographies[-1]
-            for index in range(2, len(self.homographies)):
-                h = np.matmul(self.homographies[-index], h)
+            h = homographies_to_use[-1]
+            for index in range(2, len(homographies_to_use) + 1):
+                print("index: -", index, "\n", (homographies_to_use[-index]))
+                h = homographies_to_use[-index] @ h
 
             #lr = h[2, :]
             #print("ast row: " + str(lr))
@@ -196,6 +218,24 @@ class PanoStitcher():
 
         return (list_kp1, list_kp2, good)
 
+    def plot_centers(self):
+        points = [self.get_odom(self.homographies_to_origin[n]) for n in range(len(self.homographies) + 1)]
+        x = [points[x][0] for x in range(len(points))]
+        y = [points[x][1] for x in range(len(points))]
+        t = [points[x][2] for x in range(len(points))]
+        labels = ["0621", "0622", "0623", "0651", "0652", "0653"]
+
+        fig, ax = plt.subplots()
+        ax.plot(x, y, "*g")
+
+        for i, txt in enumerate(labels):
+            ax.annotate(txt, (x[i], y[i]))
+
+        plt.show()
+        #plt.title("Movement of Point (0, 0) in each image")
+
+
+
     @staticmethod
     def keypoints_to_point(lkp):
         return np.array([kp.pt for kp in lkp])
@@ -209,9 +249,18 @@ class PanoStitcher():
         :return: the homography matrix as a [3x3]
         '''
         M, mask = cv.findHomography(pts_src, pts_dest, cv.RANSAC)
-        M = cv.estimateRigidTransform(pts_src, pts_dest, True)
+        M = cv.estimateRigidTransform(pts_src, pts_dest, False)
         M = np.vstack([M, [0, 0, 1]])
-        print(M)
+
+        # Correcting Rotation matrix (doesn't really work though...)
+        #R = M[0:2, 0:2]
+        #print("R pre-correction\n" + str(R))
+        #u, s, vh = np.linalg.svd(R)
+        #print(R/(u@vh))
+
+        #M[0:2, 0:2] = u @ vh
+        #print("R post-correction\n" + str(u@vh))
+
 
         return M, mask
 
@@ -226,22 +275,28 @@ class PanoStitcher():
         '''
         min_x, min_y, max_x, max_y = PanoStitcher.get_boundaries(src.shape, h)
         dest, shift = PanoStitcher.dest_shift(dest, min_x, min_y)
+        cv.imshow("shifted dest", dest)
 
         min_y = min(min_y, 0)
         min_x = min(min_x, 0)
         max_y = max(max_y, dest.shape[0])
         max_x = max(max_x, dest.shape[1])
-        H = np.matmul(shift, h)
+        H = shift @ h
+        print(h)
+        print(shift)
+        print(H)
         print("Boundaries: " + str((min_x, min_y, max_x, max_y)))
 
         if min(min_y, min_x) < -800:
             raise Exception("bad things happening??")
 
-        warped_image = cv.warpPerspective(src, H, (max_x - min_x, max_y - min_y))
+        warped_image = cv.warpPerspective(src, H, (max_x, max_y))
+        cv.imshow("warped src", warped_image)
 
         # Put the dest_image ON TOP OF the warped image
-        combined = PanoStitcher.combine_images(dest, warped_image, alpha=0);
-        return combined
+        combined = PanoStitcher.combine_images(dest, warped_image, alpha=0.5);
+
+        return combined, shift
 
 
     @staticmethod

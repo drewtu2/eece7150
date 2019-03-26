@@ -9,8 +9,8 @@ def main():
     stitcher = PanoStitcher(mtime)
     cam = ImageLoader()
 
-    for i in range(cam.length()):
-        next = (i + 1) % cam.length()
+    for i in range(cam.length() + 1):
+        next = (i) % cam.length()
         image = cam.get(next)
 
         try:
@@ -20,8 +20,10 @@ def main():
             print(traceback.format_exc())
             print(e)
 
-        cv.waitKey(0)
-
+        if cv.waitKey(0) == 27:
+            break;
+    stitcher.plot_centers()
+    cv.waitKey(0)
     cam.release()
     cv.destroyAllWindows()
     cv.waitKey(1)
