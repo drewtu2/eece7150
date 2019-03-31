@@ -1,20 +1,26 @@
 import numpy as np
 import cv2 as cv
-import imutils
 import matplotlib.pyplot as plt
 import math
-import traceback
-
-from TimeRecord import TimeRecord
+import plotters
 from TiledDetector import TiledDetector
 from ImageLoader import ImageLoader
+import g2oOptimizer
 
 USE_SIFT = True     # True for SIFT, False for ORB
+DEBUG_LEVEL = 0     # 0 off, 1 low, 2 medium, 3 high
 
 
 class PanoStitcher():
 
-    def __init__(self, timer: TimeRecord):
+    SAME_IMAGE = 1
+    MATCHED_IMAGE = 2
+    CROSS_MATCHED = 3
+    TOO_FAR = -1
+    NO_MATCH = -2
+    PROJECTION_TOO_FAR = -3
+
+    def __init__(self, loader: ImageLoader):
         tile_size = 3
 
         if USE_SIFT:
@@ -27,62 +33,91 @@ class PanoStitcher():
         # The tiled detector we're using
         self.feat_d = TiledDetector(feat_d, tile_size, tile_size)
 
-        self.timer = timer
         self.canvas = None
 
         # The last image we used
         self.last_image = None
+        self.last_shift = None
 
         # Tuning Parameters
         self.non_max_radius = 2
         self.lowe_ratio = .7
 
+        # Images & Features
+        self.loader = loader
+        self.overlap_thing = np.eye(self.loader.length(), self.loader.length())
+        self.PROJECTION_THRESHOLD = 500
+        self.CROSS_X_THRESHOLD = 500
+        self.CROSS_Y_THRESHOLD = 300
+
         # Homographies
         self.homographies = []
         self.homographies_to_origin = [np.eye(3, 3)]
 
-    def match_images(self, image1, image2):
+        # Corner points of each image
+        self.corners = {}
+        self.relative_odom = {}
+
+    def generate_features(self):
+        """
+        Goes through the loader and adds all the features and corresponding descriptors
+        :return:
+        """
+        for i in range(self.loader.length()):
+            image = self.loader.get(i)
+            # Find the initial features
+            kp1, dst1 = self.feat_d.detectAndCompute(image)
+
+            # Reduce the original features detected using radial non max supression
+            kp1 = TiledDetector.radial_non_max(kp1, self.non_max_radius)
+
+            # Recompute the features based on non the reduced keypoints
+            kp1, dst1 = self.feat_d.compute(image, kp1)
+            self.loader.add_kpd(kp1, dst1)
+
+
+    def match_images(self, image1_num: int, image2_num: int):
         """
         Matches two images and prints the homography from image1 to image2
         :param image1:
         :param image2:
-        :return:
+        :return: None if a match isn't found, or a 3x3 homography matrix if a match is found
         """
-        # Find the initial features
-        kp1, dst1 = self.feat_d.detectAndCompute(image1)
-        kp2, dst2 = self.feat_d.detectAndCompute(image2)
+        # Load images and kpd
+        image1 = self.loader.get(image1_num)
+        kp1, dst1 = self.loader.get_kpd(image1_num)
 
-        # Reduce the original features detected using radial non max supression
-        kp1 = TiledDetector.radial_non_max(kp1, self.non_max_radius)
-        kp2 = TiledDetector.radial_non_max(kp2, self.non_max_radius)
-
-        # Recompute the features based on non the reduced keypoints
-        kp1, dst1 = self.feat_d.compute(image1, kp1)
-        kp2, dst2 = self.feat_d.compute(image2, kp2)
-
-        feat1 = TiledDetector.draw_features(image1, kp1)
-        feat2 = TiledDetector.draw_features(image2, kp2)
-        cv.imshow("Features: ", cv.hconcat([feat1, feat2]))
+        image2 = self.loader.get(image2_num)
+        kp2, dst2 = self.loader.get_kpd(image2_num)
 
         # Feature matching
         lkp1, lkp2, matches = self.match_features(kp1, dst1, kp2, dst2)
 
+        # if lkp1 is None, then there isn't a good match...
+        if lkp1 is None or len(lkp1) == 0:
+            return None
+
         # Homography estimation
         h, mask = PanoStitcher.find_h(self.keypoints_to_point(lkp1), self.keypoints_to_point(lkp2))
-        self.get_odom(h)
 
-        matched_image = PanoStitcher.displayMatches(image1, kp1, image2, kp2, matches, mask, True)
-        cv.imshow('Matched', matched_image)
+        if DEBUG_LEVEL > 1 and h is not None:
+            self.get_odom(h)
 
-        # Blending
-        test_image, _ = PanoStitcher.make_panorama(image1, image2, h)
+            image1_labeled = self.loader.get_labeled(image1_num)
+            image2_labeled = self.loader.get_labeled(image2_num)
 
-        # Display some intermediary steps
-        cv.imshow("Blended", test_image)
+            matched_image = plotters.displayMatches(image1_labeled, kp1, image2_labeled, kp2, matches, mask, True)
+            cv.imshow('Matched', matched_image)
+
+            # Blending
+            test_image, _ = PanoStitcher.make_panorama(image1, image2, h)
+
+            # Display some intermediary steps
+            cv.imshow("Blended", test_image)
 
         return h
 
-    def add_image(self, image):
+    def add_image(self, image_num):
         '''
         Add image into the current canvas
         :param image:
@@ -91,30 +126,42 @@ class PanoStitcher():
 
         # Intialize with the first image
         if self.canvas is None:
-            self.canvas = image.copy()
-            self.last_image = image.copy()
+            self.canvas = self.loader.get(image_num)
+            self.last_image = image_num
+            self.corners[image_num] = (0, 0, 0)
             return
 
-
         # Match the single step from last image to this image
-        h = self.match_images(image, self.last_image)
+        h = self.match_images(image_num, self.last_image)
 
-        # Add the h to the list of homographies
+        if h is None:
+            self.set_overlap(image_num, self.last_image, PanoStitcher.NO_MATCH)
+        self.set_overlap(image_num, self.last_image, PanoStitcher.MATCHED_IMAGE)
+
+        # Add the h to the list of homographies and add the odometry information too
         self.add_h(h)
+        self.add_relative_odom(image_num, self.last_image, self.get_odom(h))
 
-        # Cacluate the translations through to this point
+        # Calculate the translations through to this point
         h = self.homographies_to_origin[-1]
-        self.print_homos()
-        print("Composite H: \n" + str(h))
-        print("Odom...\n", self.get_odom(h))
 
-        # Make the new image
-        self.canvas, shift = self.make_panorama(image, self.canvas, h)
+        if image_num in self.corners.keys():
+            print("WARNING: Corner {} already in self.corners as ({}, {})!!!".format(
+                image_num, self.corners[image_num][0], self.corners[image_num][1]))
+        else:
+            self.corners[image_num] = self.get_odom(h)
+
+        if DEBUG_LEVEL > 0:
+            # Get the actual image
+            image = self.loader.get(image_num)
+            print("making panorama")
+            # Make the new image
+            self.canvas, shift = self.make_panorama(image, self.canvas, h, self.last_shift)
+
+            self.last_shift = shift
 
         # Update the last image
-        #min_x, min_y, max_x, max_y = PanoStitcher.get_boundaries(image.shape, shift)
-        #self.last_image = cv.warpPerspective(image, shift, (max_x, max_y))
-        self.last_image = image.copy()
+        self.last_image = image_num
 
     def print_homos(self):
         for index, h in enumerate(self.homographies):
@@ -126,16 +173,13 @@ class PanoStitcher():
         dy = h[1][2]
 
         R = h[0:2, 0:2]
-        print("R pre-correction\n" + str(R))
         u, s, vh = np.linalg.svd(R)
-        print(R/(u@vh))
 
         h[0:2, 0:2] = u @ vh
 
         theta_tan = math.atan2(h[0][1], h[0][0])
 
-        print("h: ")
-        print(h)
+        print("h: \n", h)
         print("dx: {} \t dy: {} \t theta: {} radians".format(dx, dy, theta_tan))
         return dx, dy, theta_tan
 
@@ -159,12 +203,8 @@ class PanoStitcher():
         else:
             h = homographies_to_use[-1]
             for index in range(2, len(homographies_to_use) + 1):
-                print("index: -", index, "\n", (homographies_to_use[-index]))
+                #print("index: -", index, "\n", (homographies_to_use[-index]))
                 h = homographies_to_use[-index] @ h
-
-            #lr = h[2, :]
-            #print("ast row: " + str(lr))
-            #h = np.array(h)/np.array(lr)
         return h
 
     def get_canvas(self):
@@ -216,7 +256,19 @@ class PanoStitcher():
         print("Matches Pre Ratio Test: " + str(len(matches)))
         print("Matches Post Ratio Test: " + str(len(good)))
 
-        return (list_kp1, list_kp2, good)
+        if len(good) < 5:
+            print("\n\nONLY {} MATCHES DETECTED\n\n".format(len(good)))
+
+        return list_kp1, list_kp2, good
+
+    def export_to_g2o(self, filename):
+        """
+        Exports the state of the pano object to g2o format
+        :param filename: the file name to export to.
+        :return: None
+        """
+        g2oOptimizer.g2oOptimizer.generate_g2o_file(filename, self.corners, self.relative_odom)
+
 
     def plot_centers(self):
         points = [self.get_odom(self.homographies_to_origin[n]) for n in range(len(self.homographies) + 1)]
@@ -227,6 +279,7 @@ class PanoStitcher():
 
         fig, ax = plt.subplots()
         ax.plot(x, y, "*g")
+        ax.set_title("Placement of Images")
 
         for i, txt in enumerate(labels):
             ax.annotate(txt, (x[i], y[i]))
@@ -234,7 +287,18 @@ class PanoStitcher():
         plt.show()
         #plt.title("Movement of Point (0, 0) in each image")
 
+    def plot_outlines(self):
+        base = plotters.get_image_corners(self.loader.get(self.last_image).shape)
+        corners = [(self.homographies_to_origin[n] @ base).T for n in range(len(self.homographies) + 1)]
+        corners = [corner[:, 0:2] for corner in corners]
+        #print(corners)
 
+        fig, ax = plt.subplots()
+        ax = plotters.plot_image_outlines(ax, corners)
+        ax = plotters.plot_links(ax, self.corners, self.relative_odom)
+        ax.autoscale()
+        #plt.ion()
+        plt.show()
 
     @staticmethod
     def keypoints_to_point(lkp):
@@ -250,6 +314,10 @@ class PanoStitcher():
         '''
         M, mask = cv.findHomography(pts_src, pts_dest, cv.RANSAC)
         M = cv.estimateRigidTransform(pts_src, pts_dest, False)
+
+        if M is None:
+            return None, mask
+
         M = np.vstack([M, [0, 0, 1]])
 
         # Correcting Rotation matrix (doesn't really work though...)
@@ -265,7 +333,7 @@ class PanoStitcher():
         return M, mask
 
     @staticmethod
-    def make_panorama(src, dest, h):
+    def make_panorama(src, dest, h, last_shift=None):
         '''
         Make a panorama given a src and destination image, and a homography. Src is put INSIDE of dest according to h.
         :param src: src image
@@ -273,25 +341,39 @@ class PanoStitcher():
         :param h: homography
         :return: combined image
         '''
+        #cv.imshow("original dest", dest)
+        #cv.imshow("original src", src)
         min_x, min_y, max_x, max_y = PanoStitcher.get_boundaries(src.shape, h)
-        dest, shift = PanoStitcher.dest_shift(dest, min_x, min_y)
-        cv.imshow("shifted dest", dest)
 
+        dest_shift_x = min_x
+        dest_shift_y = min_y
+        if last_shift is not None:
+            #inv_last_shift = np.linalg.pinv(last_shift)
+            inv_last_shift = last_shift
+            print("Last shift\n", last_shift)
+            dest_shift_x += int(inv_last_shift[0, 2])
+            dest_shift_y += int(inv_last_shift[1, 2])
+
+        #print("MinX: ", min_x, " MinY: ", min_y)
+        _, shift = PanoStitcher.dest_shift(dest, dest_shift_x, dest_shift_y)
+        #print("shift dest: \n", shift)
+        #src, shift = PanoStitcher.dest_shift(src, min_x, min_y)
+        #print("shift src: \n", shift)
+
+        #min_x, min_y, max_x, max_y = PanoStitcher.get_boundaries(src.shape, H)
         min_y = min(min_y, 0)
         min_x = min(min_x, 0)
         max_y = max(max_y, dest.shape[0])
         max_x = max(max_x, dest.shape[1])
-        H = shift @ h
-        print(h)
-        print(shift)
-        print(H)
-        print("Boundaries: " + str((min_x, min_y, max_x, max_y)))
+
+        #dest, shift = PanoStitcher.dest_shift(dest, min_x, min_y)
+        #cv.imshow("shifted dest", dest)
 
         if min(min_y, min_x) < -800:
             raise Exception("bad things happening??")
 
-        warped_image = cv.warpPerspective(src, H, (max_x, max_y))
-        cv.imshow("warped src", warped_image)
+        warped_image = cv.warpPerspective(src, h, (max_x, max_y))
+        #cv.imshow("warped src", warped_image)
 
         # Put the dest_image ON TOP OF the warped image
         combined = PanoStitcher.combine_images(dest, warped_image, alpha=0.5);
@@ -395,7 +477,7 @@ class PanoStitcher():
         return min_x, min_y, max_x, max_y
 
     @staticmethod
-    def dest_shift(dest, min_x, min_y):
+    def dest_shift(dest, min_x, min_y, offset=None):
         '''
         Shift an image over by a min_x and min_y if they are less than 0. O.w. Leave in place
         :param dest:
@@ -412,86 +494,105 @@ class PanoStitcher():
         shift[0, 2] = shift_x
         shift[1, 2] = shift_y
 
+        if offset is not None:
+            shift = np.linalg.inv(offset) @ shift
+            shift_x = int(shift[0, 2])
+            shift_y = int(shift[1, 2])
+
         dest_height, dest_width, dest_channels = dest.shape
 
         warped_image = cv.warpPerspective(dest, shift, (dest_width + shift_x, dest_height + shift_y))
-        return (warped_image, shift)
+        return warped_image, shift
 
-    @staticmethod
-    def displayMatches(img_left, kp1, img_right, kp2, matches, mask, display_invalid, in_image=None, color=(0, 255, 0)):
-        '''
-        This function extracts takes a 2 images, set of keypoints and a mask of valid
-        (mask as a ndarray) keypoints and plots the valid ones in green and invalid in red.
-        The mask should be the same length as matches
-        '''
+    def set_overlap(self, index1: int, index2: int, state: int):
+        """
+        Sets the state of the overlapping
+        :param index1: the first image index
+        :param index2: the second image index
+        :param state: true if they overlap
+        :return: no return
+        """
 
-        bool_mask = mask.astype(bool)
+        self.overlap_thing[index1, index2] = state
+        self.overlap_thing[index2, index1] = state
 
-        single_point_color = (0, 255, 255)
-
-        if in_image is None:
-            mode_flag = 0
+    def add_relative_odom(self, src_index, dest_index, odom):
+        """
+        Adds the relative odometry motion to move from image[src_index] to the image[dest_index]
+        :param src_index: the index of the image to come from
+        :param dest_index: the index of the image to go to
+        :param odom: the odometry motion
+        :return: None
+        """
+        if src_index not in self.relative_odom.keys():
+            self.relative_odom[src_index] = {dest_index: odom}
         else:
-            mode_flag = 1
+            self.relative_odom[src_index][dest_index] = odom
 
-        img_valid = cv.drawMatches(img_left, kp1, img_right, kp2, matches, in_image,
-                                    matchColor=color,
-                                    singlePointColor=single_point_color,
-                                    matchesMask=bool_mask.ravel().tolist(), flags=mode_flag)
+    def check_cross_matches(self):
+        """
+        Runs through all images and looks for potential cross links
+        :return:
+        """
 
-        if display_invalid:
-            img_valid = cv.drawMatches(img_left, kp1, img_right, kp2, matches, img_valid,
-                                        matchColor=(0, 0, 255),
-                                        singlePointColor=single_point_color,
-                                        matchesMask=np.invert(bool_mask).ravel().tolist(),
-                                        flags=1)
-        return img_valid
+        # Check half of the corners to every other corner because matching corner N to M is the same
+        # as matching corner M to N.
+        for index in range(int((len(self.corners) + 1)/2 + 1)):
+            base_corner = self.corners[index]
 
-def pano(scale = .5):
-    cam = ImageLoader()
-    cv.startWindowThread()
+            # Match to every other corner. Offset by two because we should have already matched to corner + 1 before...
+            for match_index in range(index + 2, len(self.corners)):
+                if DEBUG_LEVEL > 0:
+                    cv.waitKey()
 
-    mtime = TimeRecord()
-    stitcher = PanoStitcher(mtime)
-    counter = 0
-    print(cam.length())
+                print("Checking images {} and {}...".format(index, match_index))
 
-    for i in range(0, cam.length()):
+                test_corner = self.corners[match_index]
 
-        mtime.start("total")
-        mtime.start("read")
-        ret_val, img = cam.read()  # read frame
-        mtime.end("read")
+                # Calculate the distance between the X and Y component of the two corners
+                delta_x = abs(base_corner[0] - test_corner[0])
+                delta_y = abs(base_corner[1] - test_corner[1])
 
-        #if not ret_val:
-        #    break
-        if img is None:
-            pass
+                # If the distance exceeds a preset threshold, we're going to assume no match
+                if delta_x > self.CROSS_X_THRESHOLD or delta_y > self.CROSS_Y_THRESHOLD:
+                    print("\tImage {} and {} are too far apart for overlap...".format(index, match_index))
+                    print("\tDelta X: {} \t Delta Y {}".format(delta_x, delta_y))
+                    print("\tDelta X Threshold: {} \t Delta Y Threshold: {}".format(
+                        self.CROSS_X_THRESHOLD, self.CROSS_Y_THRESHOLD))
+                    self.set_overlap(index, match_index, PanoStitcher.TOO_FAR)
+                    continue
 
-        #img = cv.resize(img, (0,0), fx=scale, fy=scale)
-        #img = imutils.rotate(img, 270)
+                # If we've made it here, the images are close enough where a match might exist. Let's attempt to match
+                # images
+                h = self.match_images(match_index, index)
 
-        try:
-            stitcher.add_image(img)
-        except Exception as e:
-            print(e)
-            print(traceback.format_exc())
-            pass
-        canvas = stitcher.get_canvas()
-        img = mtime.add_fps(img)
+                # an h may not have been found... if so, mark it as bad...
+                if h is None:
+                    print("\tNo match between image {} and {}...\n\n".format(index, match_index))
+                    self.set_overlap(index, match_index, PanoStitcher.NO_MATCH)
 
-        mtime.iterate()
+                    continue
 
-        cv.imshow('Feed', img)
-        cv.imshow('Canvas', canvas)
+                # Check projection distance
+                proj_coord = h @ np.array([base_corner[0], base_corner[1], 1])
 
-        if cv.waitKey(1) == 27:
-            break  # esc to quit
-        cv.waitKey(0)
+                # Find the distance between the projected placement and the first past placement
+                dist = np.linalg.norm(proj_coord[0:2] - np.array([test_corner[0], test_corner[1]]))
 
-    cv.waitKey(1)
-    cam.release()
-    cv.destroyAllWindows()
-    cv.waitKey(1)
+                print("\tThreshold: {} \t Actual: {}...".format(self.PROJECTION_THRESHOLD, dist))
+                print("\tFirst Pass: ({}, {}) \t Projected: ({}, {})...".format(
+                    test_corner[0], test_corner[1],
+                    proj_coord[0], proj_coord[1]))
+                # If distance between the projected point is too far, mark as no overlap
+                if dist > self.PROJECTION_THRESHOLD:
+                    print("\tProjection distance too far between image {} and {}...\n\n".format(index, match_index))
+                    self.set_overlap(index, match_index, PanoStitcher.PROJECTION_TOO_FAR)
+                    continue
+
+                # If we've gotten to this part, we've got a cross link!
+                print("\tCross link between images {} and {}...".format(index, match_index))
+                print("Odom: {}".format(self.get_odom(h)))
+                self.add_relative_odom(match_index, index, self.get_odom(h))
+                self.set_overlap(index, match_index, PanoStitcher.CROSS_MATCHED)
 
 

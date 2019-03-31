@@ -1,12 +1,15 @@
 from scipy.io import loadmat
-import cv2 as cv
+import pano_obj
 import glob
 import numpy as np
 import re
-from pano_obj import PanoStitcher
 import g2o
 import matplotlib.pyplot as plt
-import math
+from typing import List, Dict, Tuple
+
+Odom = Tuple[float, float, float]
+LinkDict = Dict[int, Dict[int, Odom]]
+
 
 class g2oOptimizer:
 
@@ -17,6 +20,24 @@ class g2oOptimizer:
         self.g2o_output = "output.g2o"
         self.order = ["0621", "0622", "0623", "0651", "0652", "0653"]
 
+    @staticmethod
+    def generate_g2o_file(filename, vertices: Dict[int, Tuple[int, int, int]], links: LinkDict):
+        # Writes all the vertices
+        vertex_string = ""
+        for src_key in vertices.keys():
+            x, y, theta = vertices[src_key]
+            vertex_string += g2oOptimizer.write_vertex(src_key, x, y, theta)
+
+        # Writes all the edges
+        edge = ""
+        for src_key in links.keys():
+            # For every link from this corner
+            for dest_key in links[src_key]:
+                dx, dy, dtheta = links[src_key][dest_key]
+                edge += g2oOptimizer.write_edge(dest_key, src_key, dx, dy, dtheta, np.eye(3,3, dtype=np.uint8))
+
+        full_string = vertex_string + "FIX 0\n" + edge
+        g2oOptimizer.write_g2o(filename, full_string)
 
     def g2o_file_from_mats(self):
         mats = glob.glob("../junk/mats/first_six/*.mat")
@@ -36,9 +57,9 @@ class g2oOptimizer:
             # find homography
             pt1 = match_points['ff']
             pt2 = match_points['gg']
-            M, mask = PanoStitcher.find_h(pt2, pt1)
+            M, mask = pano_obj.PanoStitcher.find_h(pt2, pt1)
             print(M)
-            dx, dy, dtheta = PanoStitcher.get_odom(M)
+            dx, dy, dtheta = pano_obj.PanoStitcher.get_odom(M)
 
             edge += self.write_edge(id_from, id_to, dx, dy, dtheta, np.eye(3,3, dtype=np.uint8))
 
@@ -51,7 +72,7 @@ class g2oOptimizer:
 
         vertex_string = self.write_vertices()
         full_string = vertex_string + "FIX " + self.order[0] + "\n" + edge
-        self.write_g2o(full_string)
+        self.write_g2o(self.g2o_input, full_string)
 
         #print(match_points)
 
@@ -68,10 +89,11 @@ class g2oOptimizer:
             return helper(self.order[prior_index]) @ h
 
         final_h = helper(outer_image_id)
-        return PanoStitcher.get_odom(final_h)
+        return pano_obj.PanoStitcher.get_odom(final_h)
 
-    def write_g2o(self, g2o_string):
-        with open(self.g2o_input, "w") as f:
+    @staticmethod
+    def write_g2o(filename, g2o_string):
+        with open(filename, "w") as f:
             f.write(g2o_string)
 
     def extract_image_names(self, filename):
@@ -88,13 +110,12 @@ class g2oOptimizer:
             vertices_string += self.write_vertex(node, x, y, t)
         return vertices_string
 
-    def write_vertex(self, id, x, y, theta):
-        #id = self.order.index(id)
+    @staticmethod
+    def write_vertex(id, x, y, theta):
         return "VERTEX_SE2 {} {} {} {}\n".format(id, x, y, theta)
 
-    def write_edge(self, id_out, id_in, x, y, theta, info):
-        #id_out = self.order.index(id_out)
-        #id_in = self.order.index(id_in)
+    @staticmethod
+    def write_edge(id_out, id_in, x, y, theta, info):
         return "EDGE_SE2 {} {} {} {} {} {} {} {} {} {} {}\n".format(id_out, id_in,
                                                                     x, y, theta,
                                                                     info[0, 0], info[0, 1], info[0, 2],
@@ -118,18 +139,19 @@ class g2oOptimizer:
         print("end optimization")
         optimizer.save(self.g2o_output)
 
-    def graph(self):
+    @staticmethod
+    def graph(input_file, output_file):
 
         fig, ax = plt.subplots()
 
         input = g2o.SparseOptimizer()
-        input.load(self.g2o_input)
+        input.load(input_file)
 
         output = g2o.SparseOptimizer()
-        output.load(self.g2o_output)
+        output.load(output_file)
 
         g2oOptimizer.plot_g2o_SE2(ax, input, True)
-        g2oOptimizer.plot_g2o_SE2(ax, output, True)
+        g2oOptimizer.plot_g2o_SE2(ax, output, False)
         plt.show()
 
 
@@ -172,8 +194,9 @@ class g2oOptimizer:
 
 if __name__ == "__main__":
     opt = g2oOptimizer()
-    opt.g2o_file_from_mats()
+    #opt.g2o_file_from_mats()
     #opt.optimize(20, "vik_solution_before_opt.txt")
-    opt.optimize(100)
-    opt.graph()
+    opt.optimize(20, "exported.g2o")
+    #opt.optimize(100)
+    opt.graph("exported.g2o", "output.g2o")
 

@@ -12,6 +12,9 @@ class ImageLoader:
                      "ESC.970622_030153.0652.tif",
                      "ESC.970622_030206.0653.tif"]
 
+        self.features = []
+        self.descriptors = []
+
     def read(self):
         im = cv2.imread("../interest/" + str(self.imgs[self.counter]))
         self.counter = self.counter + 1
@@ -26,3 +29,27 @@ class ImageLoader:
 
     def get(self, num):
         return cv2.imread("../interest/" + str(self.imgs[num]))
+
+    def get_labeled(self, num):
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        bottomLeftCornerOfText = (10, 30)
+        fontScale = 1
+        fontColor = (0, 0, 255)
+        lineType = 2
+
+        img = self.get(num)
+
+        cv2.putText(img, "Image: {}".format(num),
+                    bottomLeftCornerOfText,
+                    font,
+                    fontScale,
+                    fontColor,
+                    lineType)
+        return img
+
+    def add_kpd(self, kp, d):
+        self.features.append(kp)
+        self.descriptors.append(d)
+
+    def get_kpd(self, num):
+        return self.features[num], self.descriptors[num]
