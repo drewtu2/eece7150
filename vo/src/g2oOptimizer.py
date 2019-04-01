@@ -121,7 +121,8 @@ class g2oOptimizer:
                                                                     info[0, 0], info[0, 1], info[0, 2],
                                                                     info[1, 1], info[1, 2], info[2, 2])
 
-    def optimize(self, iterations=10, input=None):
+    @staticmethod
+    def optimize(iterations, input, output):
         solver = g2o.BlockSolverSE2(g2o.LinearSolverEigenSE2())
         solver = g2o.OptimizationAlgorithmLevenberg(solver)
 
@@ -129,15 +130,12 @@ class g2oOptimizer:
         optimizer.set_verbose(True)
         optimizer.set_algorithm(solver)
 
-        if input:
-            optimizer.load(input)
-        else:
-            optimizer.load(self.g2o_input)
+        optimizer.load(input)
         optimizer.initialize_optimization()
         print("begin optimization")
         optimizer.optimize(iterations)
         print("end optimization")
-        optimizer.save(self.g2o_output)
+        optimizer.save(output)
 
     @staticmethod
     def graph(input_file, output_file):
@@ -196,7 +194,7 @@ if __name__ == "__main__":
     opt = g2oOptimizer()
     #opt.g2o_file_from_mats()
     #opt.optimize(20, "vik_solution_before_opt.txt")
-    opt.optimize(20, "exported.g2o")
-    #opt.optimize(100)
+    #opt.optimize(20, "exported.g2o")
+    g2oOptimizer.optimize(40, "exported.g2o", "output.g2o")
     opt.graph("exported.g2o", "output.g2o")
 

@@ -4,7 +4,7 @@ from ImageLoader import *
 
 
 def main():
-    cam = ImageLoader()
+    cam = ImageLoader("group6")
 
     stitcher = PanoStitcher(cam)
     stitcher.generate_features()
@@ -28,6 +28,7 @@ def main():
     stitcher.check_cross_matches()
     stitcher.plot_outlines()
     stitcher.export_to_g2o("exported.g2o")
+    g2oOptimizer.g2oOptimizer.optimize(20, "exported.g2o", "output.g2o")
     print("\n\noverlap: \n", stitcher.overlap_thing)
     cv.waitKey(0)
     cam.release()

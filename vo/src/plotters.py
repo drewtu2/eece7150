@@ -10,6 +10,7 @@ from typing import List, Dict, Tuple
 Odom = Tuple[float, float, float]
 LinkDict = Dict[int, Dict[int, Odom]]
 
+
 def get_image_corners(shape):
     """
     Takes in an image shape and returns the corners as an 3x4 matrix
