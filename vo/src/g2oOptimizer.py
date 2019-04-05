@@ -192,9 +192,11 @@ class g2oOptimizer:
 
 if __name__ == "__main__":
     opt = g2oOptimizer()
-    #opt.g2o_file_from_mats()
-    #opt.optimize(20, "vik_solution_before_opt.txt")
+    opt.g2o_file_from_mats()
+    #opt.optimize(20, "vik_solution_before_opt.txt", "output.g2o")
     #opt.optimize(20, "exported.g2o")
-    g2oOptimizer.optimize(40, "exported.g2o", "output.g2o")
-    opt.graph("exported.g2o", "output.g2o")
+    #g2oOptimizer.optimize(40, "exported.g2o", "output.g2o")
+    g2oOptimizer.optimize(40, "input.g2o", "output.g2o")
+    #opt.graph("exported.g2o", "output.g2o")
+    opt.graph("input.g2o", "output.g2o")
 

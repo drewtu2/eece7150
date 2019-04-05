@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 from scipy import spatial
 
-SHOW_TILING = False
+SHOW_TILING = True
 
 class TiledDetector:
     """

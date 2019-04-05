@@ -8,7 +8,7 @@ from ImageLoader import ImageLoader
 import g2oOptimizer
 
 USE_SIFT = True     # True for SIFT, False for ORB
-DEBUG_LEVEL = 0     # 0 off, 1 low, 2 medium, 3 high
+DEBUG_LEVEL = 3     # 0 off, 1 low, 2 medium, 3 high
 
 
 class PanoStitcher():
@@ -159,6 +159,7 @@ class PanoStitcher():
             self.canvas, shift = self.make_panorama(image, self.canvas, h, self.last_shift)
 
             self.last_shift = shift
+            cv.waitKey()
 
         # Update the last image
         self.last_image = image_num

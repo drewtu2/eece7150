@@ -29,6 +29,7 @@ def main():
     stitcher.plot_outlines()
     stitcher.export_to_g2o("exported.g2o")
     g2oOptimizer.g2oOptimizer.optimize(20, "exported.g2o", "output.g2o")
+    g2oOptimizer.g2oOptimizer.graph("exported.g2o", "output.g2o")
     print("\n\noverlap: \n", stitcher.overlap_thing)
     cv.waitKey(0)
     cam.release()
