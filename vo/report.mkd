@@ -194,4 +194,33 @@ working, even though it likely shouldn't have been...
 covariance. This should be updated to better reeflect the uncertainty. 
 
 
+# Notes on installing and running
+- Opencv needs specific contrib version to access SIFT
+`pip install opencv-contrib-python==3.4.2.16`
+- g2o needs to be installed via th following instructions
+```
+cd g2opy
+mkdir build
+cd build
+cmake ..
+make -j8
+cd ..
+python setup.py install
+```
+The g2o folder should already exist as a submodule within this directory. It
+may need to be initialized. 
+
+running the cmake for g2o may run into some issues with needing qt5. might be 
+able to resolve with the following... I'm not sure qt is even needed, but... it 
+complained and then I tried things and then it went away. 
+
+`brew install qt5`
+`export CMAKE_PREFIX_PATH=$(brew --prefix qt)`
+
+I ran into an issue with running the `python setup.py install` script as well. 
+It looks like there's an assert to only expect one version of the library to be
+installed. Digging into it, I realized it had installed two version, one for 
+python 3.6 and one for 3.7. I'm using 3.7 so I commented out the assert statement
+and manually modifed the setup file to install only the second. 
+
 
